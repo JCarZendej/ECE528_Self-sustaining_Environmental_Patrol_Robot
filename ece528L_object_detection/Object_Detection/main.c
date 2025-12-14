@@ -1,25 +1,25 @@
 /**
  * @file main.c
- * @brief Main source code for the ADC program.
+ * @brief Self-Sustaining Environmental Patrol Robot
  *
- * This file contains the main entry point for the ADC program.
- * The main controller (Controller_1) demonstrates a Wall Follower robot that explores a simple maze.
+ * Board:  MSP432P401R LaunchPad
  *
- * It interfaces the following peripherals using the ADC14 module to demonstrate object detection:
- *  - Three Sharp GP2Y0A21YK0F Analog Distance Sensor (10-80cm)
+ * Features:
+ *  - Reads temperature and humidity from DHT22 sensor on P1.7
+ *  - Irrigation state machine drives PWM LED (P2.4) and prints to UART
+ *  - Uses three Sharp GP2Y0A21YK0F distance sensors for wall-following
+ *  - Wall-follower controller runs at 100 Hz (SysTick)
+ *  - Distance sensors sampled at 2 kHz (Timer A1)
  *
- * Timers are used in this lab:
- *  - SysTick:  Used to generate periodic interrupts at a specified rate (100 Hz)
- *  - Timer A0: Used to generate PWM signals that will be used to drive the DC motors
- *  - Timer A1: Used to generate periodic interrupts at a specified rate (2 kHz)
- *
- * @author
+ * @author Juan Zendejas
  *
  */
 
-#include <stdint.h>
-#include <math.h>
 #include "msp.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <math.h>
+
 #include "inc/Clock.h"
 #include "inc/CortexM.h"
 #include "inc/GPIO.h"
@@ -30,105 +30,81 @@
 #include "inc/LPF.h"
 #include "inc/Analog_Distance_Sensors.h"
 
-//#define CONTROLLER_1    1
-//#define CONTROLLER_2    1
-#define CONTROLLER_3    1
 
-//#define DEBUG_ACTIVE    1
+#define CONTROLLER_1    1
+// #define CONTROLLER_2  1
+// #define CONTROLLER_3  1
 
-// Initialize constant distance values (in mm)
+//#define DEBUG_ACTIVE   1
+
+// Distance thresholds (mm)
 #define TOO_CLOSE_DISTANCE  200
 #define TOO_FAR_DISTANCE    400
 #define DESIRED_DISTANCE    250
 
-// Initialize constant PWM duty cycle values for the motors
+// Motor PWM constants (Timer A0 from lab)
 #define PWM_NOMINAL         2500
 #define PWM_SWING           1000
 #define PWM_MIN             (PWM_NOMINAL - PWM_SWING)
 #define PWM_MAX             (PWM_NOMINAL + PWM_SWING)
 
-// Declare global variables used to store filtered distance values from the Analog Distance Sensor
+// Filtered ADC values
 uint32_t Filtered_Distance_Left;
 uint32_t Filtered_Distance_Center;
 uint32_t Filtered_Distance_Right;
 
-// Declare global variables used to store converted distance values from the Analog Distance Sensor
+// Calibrated distances (mm)
 int32_t Converted_Distance_Left;
 int32_t Converted_Distance_Center;
 int32_t Converted_Distance_Right;
 
-// Declare global variable used to store the amount of error
+// Controller variables
 int32_t Error;
-
-// Proportional Controller Gain
 int32_t Kp = 4;
-
-// Initialize set point to 250 mm
 int32_t Set_Point = 250;
-
-// Declare global variables used to update PWM duty cycle values for the motors
 uint16_t Duty_Cycle_Left;
 uint16_t Duty_Cycle_Right;
 
+
 /**
- * @brief This function enables ADC14 and samples the three Analog Distance Sensors.
- *
- * This function enables the ADC14 module and samples data from three Analog Distance Sensors (A17, A14, and A16).
- * It applies a low-pass filter to the raw sensor values and then calibrates them to obtain converted distance values.
- * The converted distance values are used for distance control and may be optionally printed if debug mode is active.
- *
- * @param None
- *
- * @return None
+ * @brief Sample three analog distance sensors and update global distances.
  */
-void Sample_Analog_Distance_Sensor()
+void Sample_Analog_Distance_Sensor(void)
 {
-    // Declare local variables for the Sharp GP2Y0A21YK0F Analog Distance Sensors
-    // before passing their addresses
     uint32_t Raw_A17;
     uint32_t Raw_A14;
     uint32_t Raw_A16;
 
-    // Start conversion of Analog Distance Sensor raw values
     Analog_Distance_Sensor_Start_Conversion(&Raw_A17, &Raw_A14, &Raw_A16);
 
-    // Apply low-pass filter to raw values
-    Filtered_Distance_Right = LPF_Calc(Raw_A17);
+    // Low-pass filter
+    Filtered_Distance_Right  = LPF_Calc(Raw_A17);
     Filtered_Distance_Center = LPF_Calc2(Raw_A14);
-    Filtered_Distance_Left = LPF_Calc3(Raw_A16);
+    Filtered_Distance_Left   = LPF_Calc3(Raw_A16);
 
-    // Convert filtered distance values using the calibration formula
-    Converted_Distance_Left = Analog_Distance_Sensor_Calibrate(Filtered_Distance_Left);
+    // Calibrate to distance in mm
+    Converted_Distance_Left   = Analog_Distance_Sensor_Calibrate(Filtered_Distance_Left);
     Converted_Distance_Center = Analog_Distance_Sensor_Calibrate(Filtered_Distance_Center);
-    Converted_Distance_Right = Analog_Distance_Sensor_Calibrate(Filtered_Distance_Right);
+    Converted_Distance_Right  = Analog_Distance_Sensor_Calibrate(Filtered_Distance_Right);
 }
 
 /**
- * @brief This function updates the PWM duty cycle values for the motors based on the measured distance values.
- *
- * This function calculates the error between the measured distances of the left and right sensors
- * and adjusts the motor duty cycles to maintain a desired distance. It also ensures that the
- * duty cycles remain within the defined range. It is used to drive along walls in a track.
- *
- * @param None
- *
- * @return None
+ * @brief Lab 6 Controller_1 — wall follower.
  */
-void Controller_1()
+void Controller_1(void)
 {
-    // Check if both the left and right distance sensor readings are greater than the desired distance
-    if ((Converted_Distance_Left > DESIRED_DISTANCE) && (Converted_Distance_Right > DESIRED_DISTANCE))
+    // Same logic as lab: use left/right distances to follow wall
+
+    if ((Converted_Distance_Left > DESIRED_DISTANCE) &&
+        (Converted_Distance_Right > DESIRED_DISTANCE))
     {
-        // Calculate the set point as the average of the left and right sensor distance readings
         Set_Point = (Converted_Distance_Left + Converted_Distance_Right) / 2;
     }
     else
     {
-        // If at least one distance sensor reading is below the desired distance, assign the set point to the desired distance
         Set_Point = DESIRED_DISTANCE;
     }
 
-    // Calculate the error based on the sensor readings
     if (Converted_Distance_Left < Converted_Distance_Right)
     {
         Error = Converted_Distance_Left - Set_Point;
@@ -138,286 +114,244 @@ void Controller_1()
         Error = Set_Point - Converted_Distance_Right;
     }
 
-    // Calculate the new duty cycle for the right motor based on the error and proportional constant (Kp)
     Duty_Cycle_Right = PWM_NOMINAL + (Kp * Error);
-
-    // Calculate the new duty cycle for the left motor based on the error and proportional constant (Kp)
     Duty_Cycle_Left  = PWM_NOMINAL - (Kp * Error);
 
-    // Ensure that the duty cycle for the right motor does not go below the minimum PWM value
     if (Duty_Cycle_Right < PWM_MIN) Duty_Cycle_Right = PWM_MIN;
-
-    // Ensure that the duty cycle for the right motor does not exceed the maximum PWM value
     if (Duty_Cycle_Right > PWM_MAX) Duty_Cycle_Right = PWM_MAX;
-
-    // Ensure that the duty cycle for the left motor does not go below the minimum PWM value
     if (Duty_Cycle_Left  < PWM_MIN) Duty_Cycle_Left  = PWM_MIN;
-
-    // Ensure that the duty cycle for the left motor does not exceed the maximum PWM value
     if (Duty_Cycle_Left  > PWM_MAX) Duty_Cycle_Left  = PWM_MAX;
 
 #ifndef DEBUG_ACTIVE
-    // Apply the updated PWM duty cycle values to the motors
     Motor_Forward(Duty_Cycle_Left, Duty_Cycle_Right);
 #endif
 }
 
-/**
- * @brief
- *
- * @param None
- *
- * @return None
- */
-void Controller_2()
+// DHT22 on P1.7
+#define DHT22_BIT          BIT7       // P1.7
+
+// LED PWM on P2.4 (TA0.1)
+#define LED_PWM_BIT        BIT4       // P2.4
+#define PWM_PERIOD_TICKS   48000      // ~250 Hz at 12 MHz SMCLK
+
+// Irrigation state machine
+typedef enum {
+    IRR_STATE_STARTUP = 0,
+    IRR_STATE_OK,
+    IRR_STATE_DRY,
+    IRR_STATE_VERY_DRY
+} IrrigationState;
+
+#define HUMIDITY_VERY_DRY  30.0f
+#define HUMIDITY_DRY       50.0f
+
+static IrrigationState current_state = IRR_STATE_STARTUP;
+
+// DHT22 raw bytes
+static uint8_t humidity_int, humidity_dec, temp_int, temp_dec, checksum;
+
+// Simple delay wrappers
+static void Delay_us(uint32_t us)
 {
-    int32_t center;
-        int32_t left;
-        int32_t right;
-
-        int32_t noObjectDistance;
-        int32_t tooCloseStopDistance;
-
-        int32_t diff;  // right - left, used for steering
-
-        center = Converted_Distance_Center;
-        left   = Converted_Distance_Left;
-        right  = Converted_Distance_Right;
-
-        noObjectDistance     = TOO_FAR_DISTANCE + 200;   // no object if center is very far
-        tooCloseStopDistance = TOO_CLOSE_DISTANCE - 50;  // stop a bit before "too close"
-
-
-        if (center > noObjectDistance)
-        {
-            Duty_Cycle_Left  = 0;
-            Duty_Cycle_Right = 0;
-
-    #ifndef DEBUG_ACTIVE
-            Motor_Stop();
-    #endif
-            return;
-        }
-
-        // Object is too close: stop so we do not hit it
-        if (center < tooCloseStopDistance)
-        {
-            Duty_Cycle_Left  = 0;
-            Duty_Cycle_Right = 0;
-
-    #ifndef DEBUG_ACTIVE
-            Motor_Stop();
-    #endif
-            return;
-        }
-
-        // 2. Object is at a usable distance -> follow it
-
-        // Start with a gentle forward speed
-        Duty_Cycle_Left  = PWM_NOMINAL - (PWM_SWING / 2);
-        Duty_Cycle_Right = PWM_NOMINAL - (PWM_SWING / 2);
-
-        // 2a. Adjust forward speed based on how far the object is (CENTER sensor)
-        if (center > DESIRED_DISTANCE + 20)
-        {
-            // Object is farther than desired: speed up a little
-            Duty_Cycle_Left  += PWM_SWING / 4;
-            Duty_Cycle_Right += PWM_SWING / 4;
-        }
-        else if (center < DESIRED_DISTANCE - 20)
-        {
-            // Object is closer than desired (but not too close): slow down
-            Duty_Cycle_Left  -= PWM_SWING / 4;
-            Duty_Cycle_Right -= PWM_SWING / 4;
-        }
-
-        // 2b. Steer based on LEFT and RIGHT sensors
-        //
-        // diff > 0  -> right is farther than left  -> object is closer on LEFT
-        // diff < 0  -> left is farther than right  -> object is closer on RIGHT
-        diff = right - left;
-
-        // Strong turn if object is far to one side
-        if (diff > 80)
-        {
-            // Object much closer on left -> strong left turn
-            Duty_Cycle_Left  -= PWM_SWING / 3;   // slow left wheel a lot
-            Duty_Cycle_Right += PWM_SWING / 3;   // speed up right wheel
-        }
-        else if (diff > 30)
-        {
-            // Object a bit closer on left -> gentle left turn
-            Duty_Cycle_Left  -= PWM_SWING / 6;
-            Duty_Cycle_Right += PWM_SWING / 6;
-        }
-        else if (diff < -80)
-        {
-            // Object much closer on right -> strong right turn
-            Duty_Cycle_Right -= PWM_SWING / 3;
-            Duty_Cycle_Left  += PWM_SWING / 3;
-        }
-        else if (diff < -30)
-        {
-            // Object a bit closer on right -> gentle right turn
-            Duty_Cycle_Right -= PWM_SWING / 6;
-            Duty_Cycle_Left  += PWM_SWING / 6;
-        }
-        // If -30 <= diff <= 30, no steering (object roughly centered)
-
-        // 3. Clamp PWM values to the allowed range
-        if (Duty_Cycle_Left < PWM_MIN)
-        {
-            Duty_Cycle_Left = PWM_MIN;
-        }
-        if (Duty_Cycle_Left > PWM_MAX)
-        {
-            Duty_Cycle_Left = PWM_MAX;
-        }
-        if (Duty_Cycle_Right < PWM_MIN)
-        {
-            Duty_Cycle_Right = PWM_MIN;
-        }
-        if (Duty_Cycle_Right > PWM_MAX)
-        {
-            Duty_Cycle_Right = PWM_MAX;
-        }
-
-    #ifndef DEBUG_ACTIVE
-        // 4. Drive motors
-        Motor_Forward(Duty_Cycle_Left, Duty_Cycle_Right);
-    #endif
+    Clock_Delay1us(us);
 }
 
-/**
- * @brief
- *
- * @param None
- *
- * @return None
- */
-void Controller_3()
+static void Delay_ms(uint32_t ms)
 {
-    int32_t center;
-        int32_t left;
-        int32_t right;
+    while (ms--)
+    {
+        Clock_Delay1us(1000);
+    }
+}
 
-        int32_t closeThreshold;
-        int32_t safeDistance;
-        int movingBackward = 0;
+// DHT22 GPIO helpers
+static void DHT22_Pin_Output(void)
+{
+    P1->DIR |= DHT22_BIT;
+}
 
-        center = Converted_Distance_Center;
-        left   = Converted_Distance_Left;
-        right  = Converted_Distance_Right;
+static void DHT22_Pin_Input(void)
+{
+    P1->DIR &= ~DHT22_BIT;
+}
 
-        // Thresholds based on existing lab defines
-        closeThreshold = TOO_CLOSE_DISTANCE;   // too close to the object
-        safeDistance   = DESIRED_DISTANCE;     // distance where we are comfortable stopping
+static void DHT22_Pin_Low(void)
+{
+    P1->OUT &= ~DHT22_BIT;
+}
 
-        // --------------------------------------------------------
-        // 1. Decide if we are too close and should move backward
-        //    or if we are at a safe distance and should stop
-        // --------------------------------------------------------
+static void DHT22_Pin_High(void)
+{
+    P1->OUT |= DHT22_BIT;
+}
 
-        // Case 1: Any sensor sees something too close -> back up
-        if ((center < closeThreshold) ||
-            (left   < closeThreshold) ||
-            (right  < closeThreshold))
-        {
-            movingBackward = 1;
+// Initialize GPIO for DHT22 on P1.7
+void DHT22_Init(void)
+{
+    P1->SEL0 &= ~DHT22_BIT;
+    P1->SEL1 &= ~DHT22_BIT;
+    P1->REN  &= ~DHT22_BIT;
+    DHT22_Pin_High();
+    DHT22_Pin_Output();
+}
 
-            // Start with a gentle reverse speed
-            Duty_Cycle_Left  = PWM_NOMINAL - (PWM_SWING / 2);
-            Duty_Cycle_Right = PWM_NOMINAL - (PWM_SWING / 2);
+// Start signal
+void DHT22_Begin(void)
+{
+    DHT22_Pin_Output();
+    DHT22_Pin_Low();
+    Delay_ms(3);        // pull low for at least 1 ms
+    DHT22_Pin_High();
+    Delay_us(30);
+    DHT22_Pin_Input();  // release line
+}
 
-            // If we are very close in front, reverse a bit faster
-            if (center < (closeThreshold - 50))
-            {
-                Duty_Cycle_Left  += PWM_SWING / 4;
-                Duty_Cycle_Right += PWM_SWING / 4;
-            }
+uint8_t DHT22_ReadByte(void)
+{
+    uint8_t i, result = 0;
 
-            // Steer slightly away from the closest side while reversing:
-            // If left is closer than right, turn more to the right while backing up.
-            if (left + 30 < right)
-            {
-                // Object closer on the left -> faster left wheel in reverse -> turn right
-                Duty_Cycle_Left  += PWM_SWING / 6;
-                Duty_Cycle_Right -= PWM_SWING / 6;
-            }
-            else if (right + 30 < left)
-            {
-                // Object closer on the right -> faster right wheel in reverse -> turn left
-                Duty_Cycle_Right += PWM_SWING / 6;
-                Duty_Cycle_Left  -= PWM_SWING / 6;
-            }
-        }
-        // Case 2: All sensors see a safe distance -> stop completely
-        else if ((center >= safeDistance) &&
-                 (left   >= safeDistance) &&
-                 (right  >= safeDistance))
-        {
-            movingBackward = 0;
-            Duty_Cycle_Left  = 0;
-            Duty_Cycle_Right = 0;
-        }
-        else
-        {
-            // Case 3: In between "too close" and "safe":
-            // still a bit close, so continue backing up slowly.
-            movingBackward = 1;
+    for (i = 0; i < 8; i++)
+    {
+        uint32_t timeout = 10000;
 
-            Duty_Cycle_Left  = PWM_NOMINAL - (PWM_SWING / 3);
-            Duty_Cycle_Right = PWM_NOMINAL - (PWM_SWING / 3);
-        }
+        // wait for line to go high
+        while (((P1->IN & DHT22_BIT) == 0) && timeout--)
+            Delay_us(1);
 
-        // --------------------------------------------------------
-        // 2. Clamp PWM values to the allowed range
-        // --------------------------------------------------------
-        if (Duty_Cycle_Left < PWM_MIN)
-        {
-            Duty_Cycle_Left = PWM_MIN;
-        }
-        if (Duty_Cycle_Left > PWM_MAX)
-        {
-            Duty_Cycle_Left = PWM_MAX;
-        }
-        if (Duty_Cycle_Right < PWM_MIN)
-        {
-            Duty_Cycle_Right = PWM_MIN;
-        }
-        if (Duty_Cycle_Right > PWM_MAX)
-        {
-            Duty_Cycle_Right = PWM_MAX;
-        }
+        // wait ~35 us then sample
+        Delay_us(35);
 
-    #ifndef DEBUG_ACTIVE
-        // --------------------------------------------------------
-        // 3. Apply motion: either reverse or stop
-        // --------------------------------------------------------
-        if (movingBackward)
-        {
-            // Move backward away from the object
-            Motor_Backward(Duty_Cycle_Left, Duty_Cycle_Right);
-        }
-        else
-        {
-            // Already at a safe distance
-            Motor_Stop();
-        }
-    #endif
+        result <<= 1;
+        if (P1->IN & DHT22_BIT)
+            result |= 1;
 
+        // wait for line to go low again
+        timeout = 10000;
+        while ((P1->IN & DHT22_BIT) && timeout--)
+            Delay_us(1);
+    }
+
+    return result;
+}
+
+// Read full frame from DHT22
+int DHT22_Read(float *temp_c, float *humidity)
+{
+    uint16_t raw_humidity, raw_temp;
+    uint8_t sum;
+
+    DHT22_Begin();
+
+    // Sync with sensor response
+    uint32_t timeout = 10000;
+    while ((P1->IN & DHT22_BIT) && timeout--) Delay_us(1);
+    timeout = 10000;
+    while (!(P1->IN & DHT22_BIT) && timeout--) Delay_us(1);
+    timeout = 10000;
+    while ((P1->IN & DHT22_BIT) && timeout--) Delay_us(1);
+
+    humidity_int = DHT22_ReadByte();
+    humidity_dec = DHT22_ReadByte();
+    temp_int     = DHT22_ReadByte();
+    temp_dec     = DHT22_ReadByte();
+    checksum     = DHT22_ReadByte();
+
+    sum = humidity_int + humidity_dec + temp_int + temp_dec;
+    if (sum != checksum)
+    {
+        return -1;
+    }
+
+    raw_humidity = (humidity_int << 8) | humidity_dec;
+    raw_temp     = (temp_int << 8) | temp_dec;
+
+    *humidity = raw_humidity / 10.0f;
+
+    if (raw_temp & 0x8000)
+    {
+        raw_temp &= 0x7FFF;
+        *temp_c = -1.0f * (raw_temp / 10.0f);
+    }
+    else
+    {
+        *temp_c = raw_temp / 10.0f;
+    }
+
+    return 0;
+}
+
+void LED_PWM_Init(void)
+{
+    P2->DIR  |= LED_PWM_BIT;
+    P2->SEL0 |= LED_PWM_BIT;
+    P2->SEL1 &= ~LED_PWM_BIT;
+
+    TIMER_A0->CTL  = TIMER_A_CTL_SSEL__SMCLK |
+                     TIMER_A_CTL_MC__UP |
+                     TIMER_A_CTL_CLR;
+    TIMER_A0->CCR[0]  = PWM_PERIOD_TICKS - 1;
+    TIMER_A0->CCTL[1] = TIMER_A_CCTLN_OUTMOD_7;
+    TIMER_A0->CCR[1]  = 0;
+}
+
+void LED_PWM_SetDutyPercent(float percent)
+{
+    if (percent < 0.0f)   percent = 0.0f;
+    if (percent > 100.0f) percent = 100.0f;
+
+    uint32_t duty = (uint32_t)((percent / 100.0f) * (float)PWM_PERIOD_TICKS);
+    TIMER_A0->CCR[1] = duty;
+}
+
+
+void Irrigation_UpdateState(float humidity)
+{
+    if (humidity < HUMIDITY_VERY_DRY)
+    {
+        current_state = IRR_STATE_VERY_DRY;
+    }
+    else if (humidity < HUMIDITY_DRY)
+    {
+        current_state = IRR_STATE_DRY;
+    }
+    else
+    {
+        current_state = IRR_STATE_OK;
+    }
+}
+
+void Irrigation_ApplyOutputs(float temp_c, float humidity)
+{
+    switch (current_state)
+    {
+        case IRR_STATE_VERY_DRY:
+            LED_PWM_SetDutyPercent(100.0f);
+            printf("[STATE: VERY DRY] Irrigation needed. ");
+            break;
+
+        case IRR_STATE_DRY:
+            LED_PWM_SetDutyPercent(60.0f);
+            printf("[STATE: DRY] Monitor and prepare to irrigate. ");
+            break;
+
+        case IRR_STATE_OK:
+            LED_PWM_SetDutyPercent(15.0f);
+            printf("[STATE: OK] Moisture level acceptable. ");
+            break;
+
+        case IRR_STATE_STARTUP:
+        default:
+            LED_PWM_SetDutyPercent(0.0f);
+            printf("[STATE: STARTUP] Waiting for stable readings. ");
+            break;
+    }
+
+    printf("Temp: %.1f C, Humidity: %.1f %%\r\n", temp_c, humidity);
 }
 
 
 /**
- * @brief This function is the handler for the SysTick periodic interrupt with a rate of 100 Hz.
- *
- * The SysTick_Handler generates a periodic interrupt that calls a specific controller function based on the selected
- * active configuration. Only one of the options can be defined at a time: CONTROLLER_1, CONTROLLER_2, or CONTROLLER_3.
- *
- * @param None
- *
- * @return None
+ * @brief SysTick interrupt at 100 Hz – runs controller.
  */
 void SysTick_Handler(void)
 {
@@ -426,88 +360,101 @@ void SysTick_Handler(void)
     Controller_1();
 
 #elif defined CONTROLLER_2
-    #if defined CONTROLLER_1 || CONTROLLER_3
-        #error "Only CONTROLLER_1, CONTROLLER_2, or CONTROLLER_3 can be active at the same time."
-    #endif
-
+  #if defined CONTROLLER_1 || defined CONTROLLER_3
+    #error "Only one controller can be active at a time."
+  #endif
     Controller_2();
 
 #elif defined CONTROLLER_3
-    #if defined CONTROLLER_1 || CONTROLLER_2
-#error "Only CONTROLLER_1, CONTROLLER_2, or CONTROLLER_3 can be active at the same time."
-    #endif
-
+  #if defined CONTROLLER_1 || defined CONTROLLER_2
+    #error "Only one controller can be active at a time."
+  #endif
     Controller_3();
 
 #else
-    #error "Define either one of the options: CONTROLLER_1, CONTROLLER_2, or CONTROLLER_3."
+  #error "Define CONTROLLER_1, CONTROLLER_2, or CONTROLLER_3."
 #endif
 }
 
 /**
- * @brief User-defined function executed by Timer A1 using a periodic interrupt at a rate of 2 kHz.
- *
- * The Timer_A1_Periodic_Task function generates a periodic interrupt with a rate of 2 kHz. It samples the
- * distance values measured by three Sharp GP2Y0A21YK0F analog distance sensors.
- *
- * @param None
- *
- * @return None
+ * @brief Timer A1 periodic task at 2 kHz – samples distance sensors.
  */
 void Timer_A1_Periodic_Task(void)
 {
     Sample_Analog_Distance_Sensor();
 }
 
+
 int main(void)
 {
-    // Declare local variables for the Sharp GP2Y0A21YK0F Analog Distance Sensors
-    // before passing their addresses
+    // Distance sensor init locals
     uint32_t Raw_A17;
     uint32_t Raw_A14;
     uint32_t Raw_A16;
 
-    // Initialize the 48 MHz Clock
+    // DHT22 / irrigation variables
+    float temp_c, humidity;
+    int status;
+
+    // Stop watchdog
+    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;
+
+    // 48 MHz system clock
     Clock_Init48MHz();
 
-    // Ensure that interrupts are disabled during initialization
+    // Disable interrupts during setup
     DisableInterrupts();
 
-    // Initialize EUSCI_A0_UART to use the printf function
+    // UART for printf
     EUSCI_A0_UART_Init_Printf();
 
-    // Initialize the DC motors
+    // Motors and distance sensors (Lab 6 hardware)
     Motor_Init();
-
-    // Initialize motor duty cycle values
-    Duty_Cycle_Left  = PWM_NOMINAL;
-    Duty_Cycle_Right = PWM_NOMINAL;
-
-    // Initialize the Analog Distance Sensor using the ADC14 module
     Analog_Distance_Sensor_Init();
 
-    // Start conversion of Analog Distance Sensor raw values
+    // First ADC conversion for LPF initialization
     Analog_Distance_Sensor_Start_Conversion(&Raw_A17, &Raw_A14, &Raw_A16);
-
-    // Initialize low-pass filters for the Analog Distance Sensor
     LPF_Init(Raw_A17, 64);
     LPF_Init2(Raw_A14, 64);
     LPF_Init3(Raw_A16, 64);
 
-    // Initialize SysTick periodic interrupt with a rate of 100 Hz
+    // SysTick at 100 Hz
     SysTick_Interrupt_Init(SYSTICK_INT_NUM_CLK_CYCLES, SYSTICK_INT_PRIORITY);
 
-    // Initialize Timer A1 with interrupts enabled and an interrupt rate of 2 kHz
+    // Timer A1 at 2 kHz for distance sensor sampling
     Timer_A1_Interrupt_Init(&Timer_A1_Periodic_Task, TIMER_A1_INT_CCR0_VALUE);
 
-    // Enable the interrupts used by Timer A1 and other modules
+    // DHT22 + LED PWM
+    DHT22_Init();
+    LED_PWM_Init();
+
+    current_state = IRR_STATE_STARTUP;
+
+    // Enable global interrupts
     EnableInterrupts();
 
-    while(1)
+    printf("Environmental Patrol Robot + DHT22 Irrigation Monitor Started\r\n");
+
+    while (1)
     {
-#ifdef DEBUG_ACTIVE
-        printf("Left: %d mm | Center: %d mm | Right: %d mm\n", Converted_Distance_Left, Converted_Distance_Center, Converted_Distance_Right);
-        Clock_Delay1us(500);
-#endif
+        // Periodic DHT22 reading
+        status = DHT22_Read(&temp_c, &humidity);
+
+        if (status == 0)
+        {
+            Irrigation_UpdateState(humidity);
+            Irrigation_ApplyOutputs(temp_c, humidity);
+        }
+        else
+        {
+            current_state = IRR_STATE_STARTUP;
+            LED_PWM_SetDutyPercent(0.0f);
+            printf("[STATE: SENSOR ERROR] DHT22 read failed\r\n");
+        }
+
+        // 2-second period between environmental samples
+        Delay_ms(2000);
+        // During this delay, SysTick and Timer A1 interrupts continue
+        // running the wall-following controller and distance sampling.
     }
 }
