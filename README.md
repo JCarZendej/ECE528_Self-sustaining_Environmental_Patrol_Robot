@@ -57,6 +57,3 @@ The final prototype successfully:
   `https://youtube.com/shorts/vx2ME-NlFOU?feature=share`
 - DHT22 readings + state machine output over UART:  
   `https://youtu.be/DQGt3XiO_hc`
-│   ├── *.mp4                 # Demo videos (or links in README)
-│   └── *.png                 # Screenshots/figures
-└── README.md
